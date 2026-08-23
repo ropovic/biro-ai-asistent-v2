@@ -1,0 +1,8 @@
+streamlit
+qdrant-client
+sentence-transformers
+langchain
+langgraph
+groq
+tavily-python
+python-dotenv
