@@ -1,7 +1,7 @@
 import streamlit as st
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
-from groq import Groq
+from google import genai
 import os
 import re
 import json
@@ -11,8 +11,6 @@ import pandas as pd
 from pathlib import Path
 from dotenv import load_dotenv
 import unicodedata
-import base64
-import time
 
 # --- LANGGRAPH ---
 from langgraph.graph import StateGraph, END
@@ -29,12 +27,16 @@ LOGO_SRBIJASUME_URL = f"{R2_BASE_URL}/srbijasume_logo.jpg"
 
 @st.cache_resource
 def get_clients():
-    client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
+    qdrant_url = os.getenv("QDRANT_URL") or st.secrets.get("QDRANT_URL", "")
+    qdrant_key = os.getenv("QDRANT_API_KEY") or st.secrets.get("QDRANT_API_KEY", "")
+    gemini_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+    
+    client = QdrantClient(url=qdrant_url, api_key=qdrant_key)
     model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    groq = Groq()
-    return client, model, groq
+    gemini = genai.Client(api_key=gemini_key)
+    return client, model, gemini
 
-qdrant_client, encoder, groq_client = get_clients()
+qdrant_client, encoder, gemini_client = get_clients()
 
 @st.cache_resource
 def ucitaj_podatke_iz_baze():
@@ -112,54 +114,26 @@ def zaposleni_odgovara_upitu(zaposleni_payload, pitanje_low):
             return True
     return False
 
-def cisti_odgovor(tekst):
-    if not tekst:
-        return ""
-    # Ukloni sve moguće varijacije think tagova i unutrašnjosti
-    tekst = re.sub(r'<think>.*?</think>', '', tekst, flags=re.DOTALL | re.IGNORECASE)
-    tekst = re.sub(r'</?think>', '', tekst, flags=re.IGNORECASE)
-    # Ako slučajno ostane zaostao nezavršen tag, očisti sve pre njega
-    if '<think>' in tekst.lower():
-        delovi = re.split(r'<think>', tekst, flags=re.IGNORECASE)
-        tekst = delovi[-1]
-    return tekst.strip()
-
 def pozovi_llm(prompt, temperatura=0.1):
-    # Provereni modeli koji NE PIŠU razmišljanje (nema Qwena ni reasoning modela)
-    modeli = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768"
-    ]
+    system_instruction = (
+        "Ti si stručni asistent Biroa. Odgovaraj ISKLJUČIVO na srpskom jeziku, direktno, sažeto i precizno. "
+        "Koristi isključivo ispravnu i tačnu stručnu terminologiju. "
+        "Zabranjeno je pisanje uvodnih fraza, pozdrava ili engleskog teksta."
+    )
     
-    for model in modeli:
-        try:
-            chat_completion = groq_client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "Ti si stručni asistent Biroa. Odgovaraj ISKLJUČIVO na srpskom jeziku, direktno, sažeto i precizno. Koristi isključivo ispravnu i tačnu stručnu terminologiju. Strogo je zabranjeno pisanje bilo kakvog razmišljanja, uvodnih fraza, pozdrava ili engleskog teksta."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                model=model,
-                temperature=temperatura,
-                max_tokens=2048
-            )
-            sirovi_odgovor = chat_completion.choices[0].message.content or ""
-            odgovor = cisti_odgovor(sirovi_odgovor)
-            
-            if not odgovor.strip():
-                continue
-            return f"{odgovor}\n\n*(Generisano pomoću: {model})*"
-        except Exception as e:
-            err_msg = str(e).lower()
-            if "429" in err_msg or "rate_limit" in err_msg or "404" in err_msg or "not_found" in err_msg or "400" in err_msg or "decommissioned" in err_msg:
-                time.sleep(1)
-                continue 
-            return f"Došlo je do greške (Model {model}): {str(e)}"
-            
-    return "Svi AI modeli su trenutno opterećeni (dostignut je limit besplatnih tokena u minuti - Rate Limit). Molimo sačekajte oko 60 sekundi i pokušajte ponovo."
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+            config={
+                "temperature": temperatura,
+                "system_instruction": system_instruction,
+            }
+        )
+        odgovor = response.text or ""
+        return f"{odgovor}\n\n*(Generisano pomoću: Gemini 1.5 Flash)*"
+    except Exception as e:
+        return f"Došlo je do greške u komunikaciji sa Gemini modelom: {str(e)}"
 
 def daj_sliku_zaposlenog(z):
     ime = str(z.get('ime_prezime', '')).strip()
@@ -182,9 +156,9 @@ def daj_sliku_zaposlenog(z):
     return f"{R2_BASE_URL}/{urllib.parse.quote(varijante[0])}"
 
 def tavily_search(query):
-    api_key = os.getenv("TAVILY_API_KEY", "")
+    api_key = os.getenv("TAVILY_API_KEY") or st.secrets.get("TAVILY_API_KEY", "")
     if not api_key:
-        return "Tavily API ključ nije podešen u .env fajlu."
+        return "Tavily API ključ nije podešen."
     
     url = "https://api.tavily.com/search"
     payload = json.dumps({
@@ -361,12 +335,7 @@ def rag_node(state: AgentState):
     if not kontekst.strip():
         kontekst = "Nema pronađenog konteksta u bazi."
     
-    prompt = f"""Na osnovu priloženog konteksta odgovori precizno na pitanje na srpskom jeziku. Koristi isključivo ispravnu i tačnu stručnu terminologiju.
-
-PRAVILA:
-1. Odgovori DIREKTNO, POTPUNO i TAČNO. Zabranjeno je razmišljanje naglas i engleski jezik.
-2. Ako se postavlja pitanje da li neka osoba postoji u bazi, proveri spisak u kontekstu i odgovori jasno.
-3. Ako u kontekstu nema traženog podatka, jasno navedi: "Traženi podatak nije pronađen u arhivi."
+    prompt = f"""Na osnovu priloženog konteksta odgovori precizno na pitanje na srpskom jeziku.
 
 Kontekst:
 {kontekst}
@@ -466,7 +435,7 @@ with st.sidebar:
         if st.button(p, use_container_width=True):
             st.session_state.brzi_unos = p
 
-st.title("🌲 Biro AI Agent (Powered by LangGraph)")
+st.title("🌲 Biro AI Agent (Powered by LangGraph & Gemini)")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -509,7 +478,7 @@ if pitanje:
                         img = daj_sliku_zaposlenog(z)
                         if img:
                             st.image(img, width=120)
-                        st.markdown(f"**{z.get('ime_project')}**" if "ime_project" in z else f"**{z.get('ime_prezime')}**\n\n*{z.get('funkcija')}*")
+                        st.markdown(f"**{z.get('ime_prezime')}**\n\n*{z.get('funkcija')}*")
             
             st.session_state.messages.append({
                 "role": "assistant", 

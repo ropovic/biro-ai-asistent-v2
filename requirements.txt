@@ -6,3 +6,4 @@ langgraph
 groq
 tavily-python
 python-dotenv
+google-genai
