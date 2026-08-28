@@ -131,7 +131,7 @@ def pozovi_llm(prompt, temperatura=0.1):
             }
         )
         odgovor = response.text or ""
-        return f"{odgovor}\n\n*(Generisano pomoću: Gemini 1.5 Flash)*"
+        return f"{odgovor}\n\n*(Generisano pomoću: Gemini 3.6 Flash)*"
     except Exception as e:
         return f"Došlo je do greške u komunikaciji sa Gemini modelom: {str(e)}"
 
