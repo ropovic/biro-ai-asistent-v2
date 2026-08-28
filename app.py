@@ -123,7 +123,7 @@ def pozovi_llm(prompt, temperatura=0.1):
     
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt,
             config={
                 "temperature": temperatura,
